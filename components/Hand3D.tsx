@@ -1,8 +1,8 @@
 "use client";
 
-import { useMemo, useRef, MutableRefObject } from "react";
+import { useRef } from "react";
 import { Canvas, useFrame } from "@react-three/fiber";
-import { OrbitControls, ContactShadows } from "@react-three/drei";
+import { OrbitControls, ContactShadows, Line } from "@react-three/drei";
 import * as THREE from "three";
 
 export type HandValues = {
@@ -14,194 +14,111 @@ export type HandValues = {
   wrist: number;
 };
 
+type FingerKey = keyof Omit<HandValues, "wrist">;
+
 type FingerSpec = {
-  key: keyof Omit<HandValues, "wrist">;
+  key: FingerKey;
   x: number;
   z: number;
   fan: number; // resting splay, radians
   l1: number;
   l2: number;
-  width: number;
+  radius: number;
 };
 
+// Proportions kept from the original working hand rig — this silhouette
+// (five tapering fingers fanned above a rectangular palm) reads correctly
+// as a hand. Not redesigning positions/lengths again, only the material
+// and adding the palm/wrist housing + sensor wires requested.
 const FINGERS: FingerSpec[] = [
-  { key: "thumb", x: -0.92, z: 0.35, fan: 0.9, l1: 0.4, l2: 0.3, width: 0.19 },
-  { key: "index", x: -0.5, z: -0.05, fan: 0.12, l1: 0.6, l2: 0.4, width: 0.16 },
-  { key: "middle", x: -0.14, z: -0.12, fan: 0, l1: 0.68, l2: 0.44, width: 0.16 },
-  { key: "ring", x: 0.22, z: -0.08, fan: -0.1, l1: 0.61, l2: 0.4, width: 0.15 },
-  { key: "pinky", x: 0.56, z: 0.0, fan: -0.22, l1: 0.46, l2: 0.3, width: 0.13 },
+  { key: "thumb", x: -0.92, z: 0.35, fan: 0.9, l1: 0.42, l2: 0.34, radius: 0.075 },
+  { key: "index", x: -0.5, z: -0.05, fan: 0.12, l1: 0.62, l2: 0.42, radius: 0.065 },
+  { key: "middle", x: -0.14, z: -0.12, fan: 0, l1: 0.7, l2: 0.46, radius: 0.065 },
+  { key: "ring", x: 0.22, z: -0.08, fan: -0.1, l1: 0.63, l2: 0.42, radius: 0.062 },
+  { key: "pinky", x: 0.56, z: 0.0, fan: -0.22, l1: 0.48, l2: 0.32, radius: 0.055 },
 ];
 
-// --- procedural textures (canvas-generated at runtime, no external image files) ---
+const DEVICE = "#14181D"; // near-black housing — palm + wrist
+const STRIPE_A = "#F7EFE2"; // cream band
+const STRIPE_B = "#E8879C"; // soft pink band
+const WIRE_COLOR = "#D93A46";
+const WIRE_HIGHLIGHT = "#F2B33D";
 
-function useFabricTexture() {
-  return useMemo(() => {
-    if (typeof document === "undefined") return null;
-    const c = document.createElement("canvas");
-    c.width = 128;
-    c.height = 128;
-    const ctx = c.getContext("2d")!;
-    ctx.fillStyle = "#26141A";
-    ctx.fillRect(0, 0, 128, 128);
-    for (let i = 0; i < 900; i++) {
-      const x = Math.random() * 128;
-      const y = Math.random() * 128;
-      const shade = Math.random() > 0.5 ? "rgba(0,0,0,0.18)" : "rgba(255,255,255,0.05)";
-      ctx.fillStyle = shade;
-      ctx.fillRect(x, y, 1.4, 1.4);
-    }
-    const tex = new THREE.CanvasTexture(c);
-    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-    tex.repeat.set(2, 6);
-    return tex;
-  }, []);
+// --- forward kinematics, done as plain trig instead of reading the THREE
+// scene graph — this mirrors exactly the rotation chain the JSX below
+// applies, so the wire endpoints track the real animated fingertip
+// position on every render without needing refs/useFrame plumbing.
+function rotX([x, y, z]: [number, number, number], a: number): [number, number, number] {
+  const c = Math.cos(a), s = Math.sin(a);
+  return [x, y * c - z * s, y * s + z * c];
 }
-
-function useSensorStripTexture() {
-  return useMemo(() => {
-    if (typeof document === "undefined") return null;
-    const c = document.createElement("canvas");
-    c.width = 64;
-    c.height = 256;
-    const ctx = c.getContext("2d")!;
-    ctx.fillStyle = "#D9C9A3";
-    ctx.fillRect(0, 0, 64, 256);
-    // ladder-style strain gauge rungs
-    ctx.strokeStyle = "rgba(60,45,25,0.55)";
-    ctx.lineWidth = 3;
-    for (let y = 6; y < 256; y += 9) {
-      ctx.beginPath();
-      ctx.moveTo(6, y);
-      ctx.lineTo(58, y);
-      ctx.stroke();
-    }
-    // side rails
-    ctx.fillStyle = "rgba(60,45,25,0.5)";
-    ctx.fillRect(0, 0, 4, 256);
-    ctx.fillRect(60, 0, 4, 256);
-    const tex = new THREE.CanvasTexture(c);
-    tex.wrapS = THREE.ClampToEdgeWrapping;
-    tex.wrapT = THREE.RepeatWrapping;
-    return tex;
-  }, []);
+function rotZ([x, y, z]: [number, number, number], a: number): [number, number, number] {
+  const c = Math.cos(a), s = Math.sin(a);
+  return [x * c - y * s, x * s + y * c, z];
 }
-
-function accentFor(v: number) {
-  if (v > 0.7) return new THREE.Color("#39FF9E");
-  if (v > 0.35) return new THREE.Color("#00E5FF");
-  return new THREE.Color("#FF3D6E");
-}
-
-function FingerSegment({
-  length,
-  width,
-  fabricMap,
-  stripMap,
-  accent,
-}: {
-  length: number;
-  width: number;
-  fabricMap: THREE.Texture | null;
-  stripMap: THREE.Texture | null;
-  accent: THREE.Color;
-}) {
-  const depth = width * 0.62;
-  return (
-    <group>
-      {/* fabric glove segment */}
-      <mesh castShadow receiveShadow>
-        <boxGeometry args={[width, length, depth]} />
-        <meshStandardMaterial map={fabricMap ?? undefined} color={fabricMap ? "#ffffff" : "#2A171C"} roughness={0.95} metalness={0.02} />
-      </mesh>
-      {/* rounded black piping along the edges */}
-      <mesh position={[width / 2 - 0.008, 0, 0]}>
-        <boxGeometry args={[0.012, length, depth + 0.01]} />
-        <meshStandardMaterial color="#0C0A0B" roughness={0.9} />
-      </mesh>
-      <mesh position={[-width / 2 + 0.008, 0, 0]}>
-        <boxGeometry args={[0.012, length, depth + 0.01]} />
-        <meshStandardMaterial color="#0C0A0B" roughness={0.9} />
-      </mesh>
-      {/* tan sensor strip on the dorsal (top) face */}
-      <mesh position={[0, 0, depth / 2 + 0.004]}>
-        <boxGeometry args={[width * 0.42, length * 0.94, 0.016]} />
-        <meshStandardMaterial
-          map={stripMap ?? undefined}
-          color={stripMap ? "#ffffff" : "#D9C9A3"}
-          roughness={0.55}
-          emissive={accent}
-          emissiveIntensity={0.18}
-        />
-      </mesh>
-    </group>
-  );
-}
-
-function ConnectorClip({ accent }: { accent: THREE.Color }) {
-  return (
-    <group>
-      <mesh>
-        <boxGeometry args={[0.15, 0.09, 0.09]} />
-        <meshStandardMaterial color="#EDEDED" roughness={0.5} metalness={0.1} />
-      </mesh>
-      <mesh position={[0, 0, 0.046]}>
-        <boxGeometry args={[0.05, 0.05, 0.01]} />
-        <meshStandardMaterial color={accent} emissive={accent} emissiveIntensity={1.2} />
-      </mesh>
-    </group>
-  );
-}
-
-function Finger({
-  spec,
-  flex,
-  fabricMap,
-  stripMap,
-  wireAnchor,
-}: {
-  spec: FingerSpec;
-  flex: number;
-  fabricMap: THREE.Texture | null;
-  stripMap: THREE.Texture | null;
-  wireAnchor: (p: THREE.Vector3) => void;
-}) {
-  const accent = accentFor(flex);
+function fingertipLocal(spec: FingerSpec, flex: number): [number, number, number] {
   const angle1 = flex * 0.95;
   const angle2 = flex * 1.25;
-  const clipRef = useRef<THREE.Group>(null);
+  const seg1 = rotX([0, spec.l1, 0], angle1);
+  const seg2 = rotX([0, spec.l2, 0], angle1 + angle2); // same-axis rotations compose additively
+  const tipInFanFrame: [number, number, number] = [seg1[0] + seg2[0], seg1[1] + seg2[1], seg1[2] + seg2[2]];
+  const tipRotated = rotZ(tipInFanFrame, spec.fan);
+  return [spec.x + tipRotated[0], 0.05 + tipRotated[1], spec.z + tipRotated[2]];
+}
 
-  useFrame(() => {
-    if (clipRef.current) {
-      const p = new THREE.Vector3();
-      clipRef.current.getWorldPosition(p);
-      wireAnchor(p);
-    }
-  });
+// alternating-band "sensor sleeve" look — a safer, lower-risk approximation
+// of a diagonal candy-cane stripe (which would need a custom canvas texture
+// I can't visually verify here); can revisit for a true diagonal stripe
+// once this baseline is confirmed to render correctly.
+function FingerBone({ length, radius, startsWith }: { length: number; radius: number; startsWith: 0 | 1 }) {
+  const bands = 4;
+  const bandLen = length / bands;
+  const colors = [STRIPE_A, STRIPE_B];
+  return (
+    <group>
+      {Array.from({ length: bands }).map((_, i) => {
+        const y = -length / 2 + bandLen * i + bandLen / 2;
+        return (
+          <mesh key={i} position={[0, y, 0]}>
+            <cylinderGeometry args={[radius, radius, bandLen * 1.02, 14]} />
+            <meshStandardMaterial color={colors[(i + startsWith) % 2]} roughness={0.5} />
+          </mesh>
+        );
+      })}
+      <mesh position={[0, -length / 2, 0]}>
+        <sphereGeometry args={[radius, 10, 10]} />
+        <meshStandardMaterial color={colors[startsWith % 2]} roughness={0.5} />
+      </mesh>
+      <mesh position={[0, length / 2, 0]}>
+        <sphereGeometry args={[radius, 10, 10]} />
+        <meshStandardMaterial color={colors[(bands - 1 + startsWith) % 2]} roughness={0.5} />
+      </mesh>
+    </group>
+  );
+}
+
+function Finger({ spec, flex }: { spec: FingerSpec; flex: number }) {
+  const angle1 = flex * 0.95;
+  const angle2 = flex * 1.25;
 
   return (
     <group position={[spec.x, 0.05, spec.z]} rotation={[0, 0, spec.fan]}>
       <group rotation={[angle1, 0, 0]}>
         <group position={[0, spec.l1 / 2, 0]}>
-          <FingerSegment length={spec.l1} width={spec.width} fabricMap={fabricMap} stripMap={stripMap} accent={accent} />
+          <FingerBone length={spec.l1} radius={spec.radius} startsWith={0} />
         </group>
-
-        {/* connector clip sits at the first knuckle, like the reference glove */}
-        <group ref={clipRef} position={[0, spec.l1 * 0.32, spec.width * 0.4]} rotation={[Math.PI / 2, 0, 0]}>
-          <ConnectorClip accent={accent} />
-        </group>
-
         <mesh position={[0, spec.l1, 0]}>
-          <sphereGeometry args={[spec.width * 0.42, 10, 10]} />
-          <meshStandardMaterial color="#1B0F13" roughness={0.9} />
+          <sphereGeometry args={[spec.radius * 0.9, 12, 12]} />
+          <meshStandardMaterial color={STRIPE_B} roughness={0.5} />
         </mesh>
 
         <group position={[0, spec.l1, 0]} rotation={[angle2, 0, 0]}>
           <group position={[0, spec.l2 / 2, 0]}>
-            <FingerSegment length={spec.l2} width={spec.width * 0.86} fabricMap={fabricMap} stripMap={stripMap} accent={accent} />
+            <FingerBone length={spec.l2} radius={spec.radius * 0.85} startsWith={1} />
           </group>
           <mesh position={[0, spec.l2, 0]}>
-            <sphereGeometry args={[spec.width * 0.32, 8, 8]} />
-            <meshStandardMaterial color="#1B0F13" roughness={0.9} />
+            <sphereGeometry args={[spec.radius * 0.75, 10, 10]} />
+            <meshStandardMaterial color={STRIPE_A} roughness={0.5} />
           </mesh>
         </group>
       </group>
@@ -209,84 +126,54 @@ function Finger({
   );
 }
 
-function WireBundle({ anchors }: { anchors: MutableRefObject<THREE.Vector3[]> }) {
-  const groupRef = useRef<THREE.Group>(null);
-  const bundlePoint = new THREE.Vector3(0, -1.05, 0.22);
-  const exitPoint = new THREE.Vector3(0, -1.9, 0.15);
-  const frameCount = useRef(0);
-
-  useFrame(() => {
-    if (!groupRef.current) return;
-    // Rebuild every 3rd frame only — wires are cosmetic and don't need 60fps
-    // precision, and this keeps geometry/material churn (and disposal cost) low.
-    frameCount.current += 1;
-    if (frameCount.current % 3 !== 0) return;
-
-    // dispose previous frame's geometries/materials before clearing to avoid
-    // leaking GPU memory over a long-running demo session
-    groupRef.current.children.forEach((child) => {
-      const mesh = child as THREE.Mesh;
-      mesh.geometry?.dispose();
-      const mat = mesh.material as THREE.Material | THREE.Material[];
-      if (Array.isArray(mat)) mat.forEach((m) => m.dispose());
-      else mat?.dispose();
-    });
-    groupRef.current.clear();
-
-    anchors.current.forEach((p) => {
-      const local = p.clone();
-      const curve = new THREE.CatmullRomCurve3([
-        local,
-        local.clone().lerp(bundlePoint, 0.45).add(new THREE.Vector3(0, -0.1, 0.05)),
-        bundlePoint.clone(),
-      ]);
-      const geom = new THREE.TubeGeometry(curve, 16, 0.014, 6, false);
-      const mat = new THREE.MeshStandardMaterial({ color: "#C21F2E", roughness: 0.6 });
-      const mesh = new THREE.Mesh(geom, mat);
-      groupRef.current!.add(mesh);
-    });
-    // black cable sleeve continuing off the wrist
-    const sleeveCurve = new THREE.CatmullRomCurve3([bundlePoint, exitPoint]);
-    const sleeveGeom = new THREE.TubeGeometry(sleeveCurve, 8, 0.05, 8, false);
-    const sleeveMat = new THREE.MeshStandardMaterial({ color: "#141414", roughness: 0.7 });
-    groupRef.current!.add(new THREE.Mesh(sleeveGeom, sleeveMat));
-  });
-
-  return <group ref={groupRef} />;
-}
-
-function GloveBody({ fabricMap }: { fabricMap: THREE.Texture | null }) {
+function Palm() {
   return (
     <group>
-      {/* palm */}
-      <mesh position={[0, -0.55, 0]} castShadow receiveShadow>
-        <boxGeometry args={[2.15, 1.15, 0.32]} />
-        <meshStandardMaterial map={fabricMap ?? undefined} color={fabricMap ? "#ffffff" : "#2A171C"} roughness={0.95} />
+      <mesh position={[0, -0.55, 0]}>
+        <boxGeometry args={[2.1, 1.1, 0.34]} />
+        <meshStandardMaterial color={DEVICE} roughness={0.5} metalness={0.15} />
       </mesh>
-      {/* black edge trim */}
-      <mesh position={[0, -0.98, 0]}>
-        <boxGeometry args={[2.2, 0.1, 0.36]} />
-        <meshStandardMaterial color="#0C0A0B" roughness={0.9} />
+      {/* rounded wrist/base housing — kept narrow and well below the finger
+          attachment points (y = 0.05) so it can't swallow the fingers */}
+      <mesh position={[0, -1.15, 0]} scale={[1, 0.85, 1]}>
+        <sphereGeometry args={[0.52, 20, 20]} />
+        <meshStandardMaterial color={DEVICE} roughness={0.5} metalness={0.15} />
       </mesh>
-      {/* wrist cuff */}
-      <mesh position={[0, -1.55, 0]} rotation={[Math.PI / 2, 0, 0]}>
-        <cylinderGeometry args={[0.46, 0.46, 0.7, 16]} />
-        <meshStandardMaterial map={fabricMap ?? undefined} color={fabricMap ? "#ffffff" : "#241318"} roughness={0.95} />
-      </mesh>
-      <mesh position={[0, -1.88, 0]} rotation={[Math.PI / 2, 0, 0]}>
-        <cylinderGeometry args={[0.47, 0.47, 0.1, 16]} />
-        <meshStandardMaterial color="#0C0A0B" roughness={0.9} />
+      <mesh position={[0, -1.65, 0]} rotation={[Math.PI / 2, 0, 0]}>
+        <capsuleGeometry args={[0.4, 0.6, 6, 12]} />
+        <meshStandardMaterial color={DEVICE} roughness={0.5} metalness={0.15} />
       </mesh>
     </group>
   );
 }
 
-function HandRig({ values }: { values: HandValues }) {
-  const group = useRef<THREE.Group>(null);
-  const fabricMap = useFabricTexture();
-  const stripMap = useSensorStripTexture();
-  const anchors = useRef<THREE.Vector3[]>(FINGERS.map(() => new THREE.Vector3()));
+const WIRE_ANCHOR: [number, number, number] = [-0.05, 0.1, 0.22];
 
+function Wires({ values, targetFingers }: { values: HandValues; targetFingers?: FingerKey[] }) {
+  const hasFocus = !!targetFingers && targetFingers.length > 0 && targetFingers.length < 5;
+  return (
+    <>
+      {FINGERS.map((spec) => {
+        const tip = fingertipLocal(spec, values[spec.key]);
+        const isTarget = !!targetFingers && targetFingers.includes(spec.key);
+        const dimmed = hasFocus && !isTarget;
+        return (
+          <Line
+            key={spec.key}
+            points={[tip, WIRE_ANCHOR]}
+            color={isTarget ? WIRE_HIGHLIGHT : WIRE_COLOR}
+            lineWidth={isTarget ? 2.6 : dimmed ? 1 : 1.6}
+            transparent
+            opacity={dimmed ? 0.35 : 0.9}
+          />
+        );
+      })}
+    </>
+  );
+}
+
+function HandRig({ values, targetFingers }: { values: HandValues; targetFingers?: FingerKey[] }) {
+  const group = useRef<THREE.Group>(null);
   useFrame(() => {
     if (!group.current) return;
     const target = values.wrist * 0.35;
@@ -295,18 +182,11 @@ function HandRig({ values }: { values: HandValues }) {
 
   return (
     <group ref={group}>
-      <GloveBody fabricMap={fabricMap} />
-      {FINGERS.map((f, i) => (
-        <Finger
-          key={f.key}
-          spec={f}
-          flex={values[f.key]}
-          fabricMap={fabricMap}
-          stripMap={stripMap}
-          wireAnchor={(p) => (anchors.current[i] = p)}
-        />
+      <Palm />
+      {FINGERS.map((f) => (
+        <Finger key={f.key} spec={f} flex={values[f.key]} />
       ))}
-      <WireBundle anchors={anchors} />
+      <Wires values={values} targetFingers={targetFingers} />
     </group>
   );
 }
@@ -316,25 +196,34 @@ export default function Hand3D({
   height = 320,
   interactive = true,
   autoRotate = true,
-  accent = "#00E5FF",
+  accent = "#1F4E6B",
+  targetFingers,
 }: {
   values: HandValues;
   height?: number;
   interactive?: boolean;
   autoRotate?: boolean;
   accent?: string;
+  /** Fingers the current exercise is targeting — their wire lights up gold
+   *  and thickens, the rest dim, so it's visually obvious what to move. */
+  targetFingers?: FingerKey[];
 }) {
   return (
     <div style={{ height }} className="w-full">
-      <Canvas camera={{ position: [0, 0.4, 3.6], fov: 40 }} dpr={[1, 1.75]} shadows>
-        <color attach="background" args={["#00000000"]} />
-        <ambientLight intensity={0.55} />
-        <directionalLight position={[3, 4, 3]} intensity={1.4} color="#FFF6E8" castShadow />
-        <pointLight position={[-3, 1, 2]} intensity={12} color={accent} />
+      <Canvas
+        camera={{ position: [0, 0.4, 3.6], fov: 40 }}
+        dpr={[1, 1.75]}
+        gl={{ alpha: true, antialias: true }}
+        onCreated={({ gl }) => gl.setClearColor(0x000000, 0)}
+      >
+        <ambientLight intensity={0.7} />
+        <pointLight position={[3, 3, 3]} intensity={22} color={"#FFF6E8"} />
+        <pointLight position={[-3, -2, 2]} intensity={12} color={accent} />
+        <spotLight position={[0, 4, 2]} angle={0.45} intensity={18} color={"#FFFFFF"} />
         <group position={[0, 0.3, 0]} scale={1.05}>
-          <HandRig values={values} />
+          <HandRig values={values} targetFingers={targetFingers} />
         </group>
-        <ContactShadows position={[0, -2.0, 0]} opacity={0.5} scale={6} blur={2.2} far={2} color="#000000" />
+        <ContactShadows position={[0, -1.85, 0]} opacity={0.28} scale={6} blur={2.6} far={2} color="#1B2A41" />
         <OrbitControls
           enabled={interactive}
           autoRotate={autoRotate}

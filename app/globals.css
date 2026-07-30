@@ -4,47 +4,52 @@
 
 html,
 body {
-  background-color: #070a10;
-  color: #e4f0ff;
+  background-color: #F7F2E7;
+  color: #1B2A41;
 }
 
 body {
-  background-image: radial-gradient(circle at 15% 10%, rgba(0, 229, 255, 0.08), transparent 40%),
-    radial-gradient(circle at 85% 90%, rgba(176, 38, 255, 0.08), transparent 40%);
+  background-image: radial-gradient(circle at 12% 8%, rgba(31, 78, 107, 0.05), transparent 45%),
+    radial-gradient(circle at 88% 92%, rgba(184, 134, 59, 0.06), transparent 45%);
   min-height: 100vh;
 }
 
+/* subtle fabric-like texture instead of the old scanline/HUD effect */
 .bg-scanlines {
   background-image: repeating-linear-gradient(
-    to bottom,
-    rgba(0, 229, 255, 0.035) 0px,
-    rgba(0, 229, 255, 0.035) 1px,
+    135deg,
+    rgba(27, 42, 65, 0.02) 0px,
+    rgba(27, 42, 65, 0.02) 1px,
     transparent 1px,
-    transparent 3px
+    transparent 5px
   );
 }
 
 .panel {
-  background: rgba(13, 20, 32, 0.72);
-  border: 1px solid #1b2a3d;
-  backdrop-filter: blur(6px);
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid #DCD3BE;
+  border-radius: 10px;
+  box-shadow: 0 1px 3px rgba(27, 42, 65, 0.06), 0 6px 16px rgba(27, 42, 65, 0.04);
+  backdrop-filter: blur(4px);
 }
 
+/* the old sci-fi clipped-corner look reads as "console", not "clinical" —
+   swap to a plain rounded card so it presents well to patients too */
 .clip-corner {
-  clip-path: polygon(0 0, calc(100% - 14px) 0, 100% 14px, 100% 100%, 14px 100%, 0 calc(100% - 14px));
+  clip-path: none;
 }
 
 ::selection {
-  background: rgba(0, 229, 255, 0.3);
+  background: rgba(184, 134, 59, 0.25);
 }
 
 ::-webkit-scrollbar {
   width: 8px;
 }
 ::-webkit-scrollbar-track {
-  background: #0d1420;
+  background: #F7F2E7;
 }
 ::-webkit-scrollbar-thumb {
-  background: #1b2a3d;
+  background: #DCD3BE;
   border-radius: 4px;
 }

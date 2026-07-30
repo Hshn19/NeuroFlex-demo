@@ -5,16 +5,19 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        void: "#070A10",
-        panel: "#0D1420",
-        panelBorder: "#1B2A3D",
-        signal: "#00E5FF",
-        signalDim: "#0891A8",
-        pulse: "#B026FF",
-        vital: "#39FF9E",
-        warn: "#FF3D6E",
-        mist: "#6B7A99",
-        bone: "#E4F0FF",
+        // Palette drawn from the referenced fabric: navy sleeve + cream body,
+        // shifted toward a warm, trustworthy clinical product rather than a
+        // neon "hacker console" — this dashboard is read by patients too.
+        void: "#F7F2E7",       // page background — warm cream
+        panel: "#FFFFFF",      // card background — clean white
+        panelBorder: "#DCD3BE", // soft cream-grey border
+        signal: "#1F4E6B",      // primary accent — deep navy-teal (was neon cyan)
+        signalDim: "#4B7086",   // muted navy-teal for secondary labels
+        pulse: "#B8863B",       // secondary accent — warm gold (was neon purple)
+        vital: "#3F8A5C",       // "good/normal" — sage green (was neon green)
+        warn: "#C1483E",        // "restricted/alert" — warm terracotta (was neon red/pink)
+        mist: "#7A7361",        // muted body text — warm grey
+        bone: "#1B2A41",        // primary heading/text — deep navy (was near-white)
       },
       fontFamily: {
         display: ["var(--font-orbitron)", "sans-serif"],
@@ -25,9 +28,9 @@ const config: Config = {
         grid: "linear-gradient(rgba(0,229,255,0.06) 1px, transparent 1px), linear-gradient(90deg, rgba(0,229,255,0.06) 1px, transparent 1px)",
       },
       boxShadow: {
-        glow: "0 0 20px rgba(0,229,255,0.25), 0 0 2px rgba(0,229,255,0.6)",
-        glowPulse: "0 0 24px rgba(176,38,255,0.35), 0 0 2px rgba(176,38,255,0.7)",
-        glowVital: "0 0 20px rgba(57,255,158,0.3), 0 0 2px rgba(57,255,158,0.6)",
+        glow: "0 0 14px rgba(31,78,107,0.18), 0 1px 2px rgba(27,42,65,0.12)",
+        glowPulse: "0 0 16px rgba(184,134,59,0.22), 0 1px 2px rgba(27,42,65,0.1)",
+        glowVital: "0 0 14px rgba(63,138,92,0.2), 0 1px 2px rgba(27,42,65,0.1)",
       },
       keyframes: {
         scan: {
