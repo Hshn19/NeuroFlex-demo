@@ -1,8 +1,8 @@
 "use client";
 
-import { useMemo, useRef } from "react";
+import { useMemo, useRef, MutableRefObject } from "react";
 import { Canvas, useFrame } from "@react-three/fiber";
-import { OrbitControls, Environment, ContactShadows } from "@react-three/drei";
+import { OrbitControls, ContactShadows } from "@react-three/drei";
 import * as THREE from "three";
 
 export type HandValues = {
@@ -21,87 +21,187 @@ type FingerSpec = {
   fan: number; // resting splay, radians
   l1: number;
   l2: number;
-  radius: number;
-  chambers: number; // PneuNet bellows segments
+  width: number;
 };
 
 const FINGERS: FingerSpec[] = [
-  { key: "thumb", x: -0.92, z: 0.35, fan: 0.9, l1: 0.42, l2: 0.34, radius: 0.075, chambers: 4 },
-  { key: "index", x: -0.5, z: -0.05, fan: 0.12, l1: 0.62, l2: 0.42, radius: 0.065, chambers: 6 },
-  { key: "middle", x: -0.14, z: -0.12, fan: 0, l1: 0.7, l2: 0.46, radius: 0.065, chambers: 6 },
-  { key: "ring", x: 0.22, z: -0.08, fan: -0.1, l1: 0.63, l2: 0.42, radius: 0.062, chambers: 6 },
-  { key: "pinky", x: 0.56, z: 0.0, fan: -0.22, l1: 0.48, l2: 0.32, radius: 0.055, chambers: 5 },
+  { key: "thumb", x: -0.92, z: 0.35, fan: 0.9, l1: 0.4, l2: 0.3, width: 0.19 },
+  { key: "index", x: -0.5, z: -0.05, fan: 0.12, l1: 0.6, l2: 0.4, width: 0.16 },
+  { key: "middle", x: -0.14, z: -0.12, fan: 0, l1: 0.68, l2: 0.44, width: 0.16 },
+  { key: "ring", x: 0.22, z: -0.08, fan: -0.1, l1: 0.61, l2: 0.4, width: 0.15 },
+  { key: "pinky", x: 0.56, z: 0.0, fan: -0.22, l1: 0.46, l2: 0.3, width: 0.13 },
 ];
 
-function flexColor(v: number) {
-  // low flex (weak/restricted) -> warn red, mid -> signal cyan, high -> vital green
+// --- procedural textures (canvas-generated at runtime, no external image files) ---
+
+function useFabricTexture() {
+  return useMemo(() => {
+    if (typeof document === "undefined") return null;
+    const c = document.createElement("canvas");
+    c.width = 128;
+    c.height = 128;
+    const ctx = c.getContext("2d")!;
+    ctx.fillStyle = "#26141A";
+    ctx.fillRect(0, 0, 128, 128);
+    for (let i = 0; i < 900; i++) {
+      const x = Math.random() * 128;
+      const y = Math.random() * 128;
+      const shade = Math.random() > 0.5 ? "rgba(0,0,0,0.18)" : "rgba(255,255,255,0.05)";
+      ctx.fillStyle = shade;
+      ctx.fillRect(x, y, 1.4, 1.4);
+    }
+    const tex = new THREE.CanvasTexture(c);
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    tex.repeat.set(2, 6);
+    return tex;
+  }, []);
+}
+
+function useSensorStripTexture() {
+  return useMemo(() => {
+    if (typeof document === "undefined") return null;
+    const c = document.createElement("canvas");
+    c.width = 64;
+    c.height = 256;
+    const ctx = c.getContext("2d")!;
+    ctx.fillStyle = "#D9C9A3";
+    ctx.fillRect(0, 0, 64, 256);
+    // ladder-style strain gauge rungs
+    ctx.strokeStyle = "rgba(60,45,25,0.55)";
+    ctx.lineWidth = 3;
+    for (let y = 6; y < 256; y += 9) {
+      ctx.beginPath();
+      ctx.moveTo(6, y);
+      ctx.lineTo(58, y);
+      ctx.stroke();
+    }
+    // side rails
+    ctx.fillStyle = "rgba(60,45,25,0.5)";
+    ctx.fillRect(0, 0, 4, 256);
+    ctx.fillRect(60, 0, 4, 256);
+    const tex = new THREE.CanvasTexture(c);
+    tex.wrapS = THREE.ClampToEdgeWrapping;
+    tex.wrapT = THREE.RepeatWrapping;
+    return tex;
+  }, []);
+}
+
+function accentFor(v: number) {
   if (v > 0.7) return new THREE.Color("#39FF9E");
   if (v > 0.35) return new THREE.Color("#00E5FF");
   return new THREE.Color("#FF3D6E");
 }
 
-function PneuNetSegment({ length, radius, chambers, color }: { length: number; radius: number; chambers: number; color: THREE.Color }) {
-  const chamberGeoms = useMemo(() => {
-    const arr = [];
-    const step = length / chambers;
-    for (let i = 0; i < chambers; i++) {
-      arr.push(-length / 2 + step * i + step / 2);
-    }
-    return arr;
-  }, [length, chambers]);
-
+function FingerSegment({
+  length,
+  width,
+  fabricMap,
+  stripMap,
+  accent,
+}: {
+  length: number;
+  width: number;
+  fabricMap: THREE.Texture | null;
+  stripMap: THREE.Texture | null;
+  accent: THREE.Color;
+}) {
+  const depth = width * 0.62;
   return (
     <group>
-      {/* core silicone tube */}
-      <mesh rotation={[Math.PI / 2, 0, 0]}>
-        <capsuleGeometry args={[radius * 0.72, length - radius * 1.2, 6, 10]} />
-        <meshPhysicalMaterial
-          color={"#0D1420"}
-          emissive={color}
-          emissiveIntensity={0.35}
-          roughness={0.25}
-          metalness={0.1}
-          transmission={0.25}
-          thickness={0.4}
-          transparent
-          opacity={0.92}
+      {/* fabric glove segment */}
+      <mesh castShadow receiveShadow>
+        <boxGeometry args={[width, length, depth]} />
+        <meshStandardMaterial map={fabricMap ?? undefined} color={fabricMap ? "#ffffff" : "#2A171C"} roughness={0.95} metalness={0.02} />
+      </mesh>
+      {/* rounded black piping along the edges */}
+      <mesh position={[width / 2 - 0.008, 0, 0]}>
+        <boxGeometry args={[0.012, length, depth + 0.01]} />
+        <meshStandardMaterial color="#0C0A0B" roughness={0.9} />
+      </mesh>
+      <mesh position={[-width / 2 + 0.008, 0, 0]}>
+        <boxGeometry args={[0.012, length, depth + 0.01]} />
+        <meshStandardMaterial color="#0C0A0B" roughness={0.9} />
+      </mesh>
+      {/* tan sensor strip on the dorsal (top) face */}
+      <mesh position={[0, 0, depth / 2 + 0.004]}>
+        <boxGeometry args={[width * 0.42, length * 0.94, 0.016]} />
+        <meshStandardMaterial
+          map={stripMap ?? undefined}
+          color={stripMap ? "#ffffff" : "#D9C9A3"}
+          roughness={0.55}
+          emissive={accent}
+          emissiveIntensity={0.18}
         />
       </mesh>
-      {/* PneuNet bellows ribs */}
-      {chamberGeoms.map((y, i) => (
-        <mesh key={i} position={[0, y, radius * 0.55]}>
-          <torusGeometry args={[radius * 0.9, radius * 0.22, 6, 12, Math.PI]} />
-          <meshStandardMaterial color={color} emissive={color} emissiveIntensity={0.7} roughness={0.4} />
-        </mesh>
-      ))}
     </group>
   );
 }
 
-function Finger({ spec, flex }: { spec: FingerSpec; flex: number }) {
-  const color = flexColor(flex);
-  const angle1 = flex * 0.95; // MCP joint curl (radians)
-  const angle2 = flex * 1.25; // PIP joint curl, curls more than base joint
+function ConnectorClip({ accent }: { accent: THREE.Color }) {
+  return (
+    <group>
+      <mesh>
+        <boxGeometry args={[0.15, 0.09, 0.09]} />
+        <meshStandardMaterial color="#EDEDED" roughness={0.5} metalness={0.1} />
+      </mesh>
+      <mesh position={[0, 0, 0.046]}>
+        <boxGeometry args={[0.05, 0.05, 0.01]} />
+        <meshStandardMaterial color={accent} emissive={accent} emissiveIntensity={1.2} />
+      </mesh>
+    </group>
+  );
+}
+
+function Finger({
+  spec,
+  flex,
+  fabricMap,
+  stripMap,
+  wireAnchor,
+}: {
+  spec: FingerSpec;
+  flex: number;
+  fabricMap: THREE.Texture | null;
+  stripMap: THREE.Texture | null;
+  wireAnchor: (p: THREE.Vector3) => void;
+}) {
+  const accent = accentFor(flex);
+  const angle1 = flex * 0.95;
+  const angle2 = flex * 1.25;
+  const clipRef = useRef<THREE.Group>(null);
+
+  useFrame(() => {
+    if (clipRef.current) {
+      const p = new THREE.Vector3();
+      clipRef.current.getWorldPosition(p);
+      wireAnchor(p);
+    }
+  });
 
   return (
     <group position={[spec.x, 0.05, spec.z]} rotation={[0, 0, spec.fan]}>
       <group rotation={[angle1, 0, 0]}>
         <group position={[0, spec.l1 / 2, 0]}>
-          <PneuNetSegment length={spec.l1} radius={spec.radius} chambers={spec.chambers} color={color} />
+          <FingerSegment length={spec.l1} width={spec.width} fabricMap={fabricMap} stripMap={stripMap} accent={accent} />
         </group>
-        {/* joint node */}
+
+        {/* connector clip sits at the first knuckle, like the reference glove */}
+        <group ref={clipRef} position={[0, spec.l1 * 0.32, spec.width * 0.4]} rotation={[Math.PI / 2, 0, 0]}>
+          <ConnectorClip accent={accent} />
+        </group>
+
         <mesh position={[0, spec.l1, 0]}>
-          <sphereGeometry args={[spec.radius * 0.85, 12, 12]} />
-          <meshStandardMaterial color={color} emissive={color} emissiveIntensity={1} />
+          <sphereGeometry args={[spec.width * 0.42, 10, 10]} />
+          <meshStandardMaterial color="#1B0F13" roughness={0.9} />
         </mesh>
 
         <group position={[0, spec.l1, 0]} rotation={[angle2, 0, 0]}>
           <group position={[0, spec.l2 / 2, 0]}>
-            <PneuNetSegment length={spec.l2} radius={spec.radius * 0.85} chambers={Math.max(3, spec.chambers - 2)} color={color} />
+            <FingerSegment length={spec.l2} width={spec.width * 0.86} fabricMap={fabricMap} stripMap={stripMap} accent={accent} />
           </group>
           <mesh position={[0, spec.l2, 0]}>
-            <sphereGeometry args={[spec.radius * 0.7, 10, 10]} />
-            <meshStandardMaterial color={color} emissive={color} emissiveIntensity={1.4} />
+            <sphereGeometry args={[spec.width * 0.32, 8, 8]} />
+            <meshStandardMaterial color="#1B0F13" roughness={0.9} />
           </mesh>
         </group>
       </group>
@@ -109,32 +209,73 @@ function Finger({ spec, flex }: { spec: FingerSpec; flex: number }) {
   );
 }
 
-function Palm() {
+function WireBundle({ anchors }: { anchors: MutableRefObject<THREE.Vector3[]> }) {
+  const groupRef = useRef<THREE.Group>(null);
+  const bundlePoint = new THREE.Vector3(0, -1.05, 0.22);
+  const exitPoint = new THREE.Vector3(0, -1.9, 0.15);
+  const frameCount = useRef(0);
+
+  useFrame(() => {
+    if (!groupRef.current) return;
+    // Rebuild every 3rd frame only — wires are cosmetic and don't need 60fps
+    // precision, and this keeps geometry/material churn (and disposal cost) low.
+    frameCount.current += 1;
+    if (frameCount.current % 3 !== 0) return;
+
+    // dispose previous frame's geometries/materials before clearing to avoid
+    // leaking GPU memory over a long-running demo session
+    groupRef.current.children.forEach((child) => {
+      const mesh = child as THREE.Mesh;
+      mesh.geometry?.dispose();
+      const mat = mesh.material as THREE.Material | THREE.Material[];
+      if (Array.isArray(mat)) mat.forEach((m) => m.dispose());
+      else mat?.dispose();
+    });
+    groupRef.current.clear();
+
+    anchors.current.forEach((p) => {
+      const local = p.clone();
+      const curve = new THREE.CatmullRomCurve3([
+        local,
+        local.clone().lerp(bundlePoint, 0.45).add(new THREE.Vector3(0, -0.1, 0.05)),
+        bundlePoint.clone(),
+      ]);
+      const geom = new THREE.TubeGeometry(curve, 16, 0.014, 6, false);
+      const mat = new THREE.MeshStandardMaterial({ color: "#C21F2E", roughness: 0.6 });
+      const mesh = new THREE.Mesh(geom, mat);
+      groupRef.current!.add(mesh);
+    });
+    // black cable sleeve continuing off the wrist
+    const sleeveCurve = new THREE.CatmullRomCurve3([bundlePoint, exitPoint]);
+    const sleeveGeom = new THREE.TubeGeometry(sleeveCurve, 8, 0.05, 8, false);
+    const sleeveMat = new THREE.MeshStandardMaterial({ color: "#141414", roughness: 0.7 });
+    groupRef.current!.add(new THREE.Mesh(sleeveGeom, sleeveMat));
+  });
+
+  return <group ref={groupRef} />;
+}
+
+function GloveBody({ fabricMap }: { fabricMap: THREE.Texture | null }) {
   return (
     <group>
-      <mesh position={[0, -0.55, 0]}>
-        <boxGeometry args={[2.1, 1.1, 0.34]} />
-        <meshPhysicalMaterial
-          color={"#0D1420"}
-          emissive={"#00E5FF"}
-          emissiveIntensity={0.12}
-          roughness={0.3}
-          metalness={0.2}
-          transparent
-          opacity={0.85}
-        />
+      {/* palm */}
+      <mesh position={[0, -0.55, 0]} castShadow receiveShadow>
+        <boxGeometry args={[2.15, 1.15, 0.32]} />
+        <meshStandardMaterial map={fabricMap ?? undefined} color={fabricMap ? "#ffffff" : "#2A171C"} roughness={0.95} />
       </mesh>
-      {/* palm circuitry lines */}
-      {[-0.6, -0.2, 0.2, 0.6].map((x, i) => (
-        <mesh key={i} position={[x, -0.55, 0.175]}>
-          <boxGeometry args={[0.02, 0.9, 0.01]} />
-          <meshStandardMaterial color={"#00E5FF"} emissive={"#00E5FF"} emissiveIntensity={2} />
-        </mesh>
-      ))}
-      {/* forearm */}
+      {/* black edge trim */}
+      <mesh position={[0, -0.98, 0]}>
+        <boxGeometry args={[2.2, 0.1, 0.36]} />
+        <meshStandardMaterial color="#0C0A0B" roughness={0.9} />
+      </mesh>
+      {/* wrist cuff */}
       <mesh position={[0, -1.55, 0]} rotation={[Math.PI / 2, 0, 0]}>
-        <capsuleGeometry args={[0.45, 1.1, 6, 12]} />
-        <meshPhysicalMaterial color={"#0D1420"} roughness={0.35} metalness={0.3} emissive={"#1B2A3D"} emissiveIntensity={0.4} />
+        <cylinderGeometry args={[0.46, 0.46, 0.7, 16]} />
+        <meshStandardMaterial map={fabricMap ?? undefined} color={fabricMap ? "#ffffff" : "#241318"} roughness={0.95} />
+      </mesh>
+      <mesh position={[0, -1.88, 0]} rotation={[Math.PI / 2, 0, 0]}>
+        <cylinderGeometry args={[0.47, 0.47, 0.1, 16]} />
+        <meshStandardMaterial color="#0C0A0B" roughness={0.9} />
       </mesh>
     </group>
   );
@@ -142,6 +283,10 @@ function Palm() {
 
 function HandRig({ values }: { values: HandValues }) {
   const group = useRef<THREE.Group>(null);
+  const fabricMap = useFabricTexture();
+  const stripMap = useSensorStripTexture();
+  const anchors = useRef<THREE.Vector3[]>(FINGERS.map(() => new THREE.Vector3()));
+
   useFrame(() => {
     if (!group.current) return;
     const target = values.wrist * 0.35;
@@ -150,10 +295,18 @@ function HandRig({ values }: { values: HandValues }) {
 
   return (
     <group ref={group}>
-      <Palm />
-      {FINGERS.map((f) => (
-        <Finger key={f.key} spec={f} flex={values[f.key]} />
+      <GloveBody fabricMap={fabricMap} />
+      {FINGERS.map((f, i) => (
+        <Finger
+          key={f.key}
+          spec={f}
+          flex={values[f.key]}
+          fabricMap={fabricMap}
+          stripMap={stripMap}
+          wireAnchor={(p) => (anchors.current[i] = p)}
+        />
       ))}
+      <WireBundle anchors={anchors} />
     </group>
   );
 }
@@ -173,16 +326,15 @@ export default function Hand3D({
 }) {
   return (
     <div style={{ height }} className="w-full">
-      <Canvas camera={{ position: [0, 0.4, 3.6], fov: 40 }} dpr={[1, 1.75]}>
+      <Canvas camera={{ position: [0, 0.4, 3.6], fov: 40 }} dpr={[1, 1.75]} shadows>
         <color attach="background" args={["#00000000"]} />
-        <ambientLight intensity={0.35} />
-        <pointLight position={[3, 3, 3]} intensity={40} color={accent} />
-        <pointLight position={[-3, -2, 2]} intensity={20} color={"#B026FF"} />
-        <spotLight position={[0, 4, 2]} angle={0.4} intensity={30} color={"#E4F0FF"} />
+        <ambientLight intensity={0.55} />
+        <directionalLight position={[3, 4, 3]} intensity={1.4} color="#FFF6E8" castShadow />
+        <pointLight position={[-3, 1, 2]} intensity={12} color={accent} />
         <group position={[0, 0.3, 0]} scale={1.05}>
           <HandRig values={values} />
         </group>
-        <ContactShadows position={[0, -1.85, 0]} opacity={0.45} scale={6} blur={2.4} far={2} color="#00E5FF" />
+        <ContactShadows position={[0, -2.0, 0]} opacity={0.5} scale={6} blur={2.2} far={2} color="#000000" />
         <OrbitControls
           enabled={interactive}
           autoRotate={autoRotate}
